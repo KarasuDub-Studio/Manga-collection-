@@ -443,6 +443,7 @@
         <button class="btn" id="grantCameraBtn">Дозволити доступ до камери</button>
       </div>
       <div id="scanner-region" style="display:none;"></div>
+      <button class="btn secondary" id="torchBtn" style="display:none;">Увімкнути ліхтарик</button>
       <div class="scan-status" id="scanStatus" style="display:none;">Наведіть камеру на штрих-код на звороті книги</div>
 
       <div id="scanResultBox" style="display:none;">
@@ -463,6 +464,16 @@
     </div>
 
     <div class="tab-pane" id="pane-manual">
+      <div class="field">
+        <label>ISBN / штрих-код (необов'язково)</label>
+        <div class="row2" style="align-items:flex-end;">
+          <div class="field" style="margin-bottom:0;">
+            <input type="text" id="manualIsbn" placeholder="напр. 9789669123456" inputmode="numeric">
+          </div>
+          <button class="btn secondary" id="manualLookupBtn" style="margin-top:0; width:auto; padding:10px 16px; white-space:nowrap;">Знайти</button>
+        </div>
+        <p id="manualLookupStatus" style="font-size:12px; color:var(--ink-faint); margin:6px 0 0;"></p>
+      </div>
       <div class="field">
         <label>Назва манги</label>
         <input type="text" id="manualTitle" placeholder="напр. Тіточка Кроу">
@@ -689,12 +700,13 @@
       html5QrCode = new Html5Qrcode('scanner-region');
       html5QrCode.start(
         { facingMode: 'environment' },
-        { fps: 10, qrbox: { width: 250, height: 120 }, formatsToSupport: [ Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8, Html5QrcodeSupportedFormats.CODE_128, Html5QrcodeSupportedFormats.UPC_A ] },
+        { fps: 12, qrbox: { width: 280, height: 160 }, aspectRatio: 1.4, formatsToSupport: [ Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8, Html5QrcodeSupportedFormats.CODE_128, Html5QrcodeSupportedFormats.CODE_39, Html5QrcodeSupportedFormats.UPC_A, Html5QrcodeSupportedFormats.UPC_E, Html5QrcodeSupportedFormats.ITF ] },
         onScanSuccess,
         () => {}
       ).then(() => {
         scannerRunning = true;
         scanStatusEl.textContent = 'Наведіть камеру на штрих-код на звороті книги';
+        setupTorchButton();
       }).catch(err => {
         showGate('denied');
       });
@@ -703,11 +715,41 @@
     }
   }
 
+  let torchOn = false;
+
+  function setupTorchButton(){
+    const torchBtn = document.getElementById('torchBtn');
+    torchOn = false;
+    torchBtn.textContent = 'Увімкнути ліхтарик';
+    try{
+      const caps = html5QrCode.getRunningTrackCapabilities();
+      if(caps && caps.torch){
+        torchBtn.style.display = 'block';
+      } else {
+        torchBtn.style.display = 'none';
+      }
+    }catch(e){
+      torchBtn.style.display = 'none';
+    }
+  }
+
+  document.getElementById('torchBtn').addEventListener('click', async () => {
+    if(!html5QrCode || !scannerRunning) return;
+    try{
+      torchOn = !torchOn;
+      await html5QrCode.applyVideoConstraints({ advanced: [{ torch: torchOn }] });
+      document.getElementById('torchBtn').textContent = torchOn ? 'Вимкнути ліхтарик' : 'Увімкнути ліхтарик';
+    }catch(e){
+      torchOn = !torchOn;
+    }
+  });
+
   function stopScanner(){
     if(html5QrCode && scannerRunning){
       html5QrCode.stop().then(() => {
         html5QrCode.clear();
         scannerRunning = false;
+        document.getElementById('torchBtn').style.display = 'none';
       }).catch(() => { scannerRunning = false; });
     }
   }
@@ -720,12 +762,14 @@
     await lookupByISBN(decodedText);
   }
 
-  async function lookupByISBN(code){
+  async function fetchIsbnData(code){
+    const cleanCode = (code || '').replace(/[^0-9Xx]/g, '');
     let title = '';
     let cover = '';
     let volume = '';
+
     try{
-      const resp = await fetch('https://www.googleapis.com/books/v1/volumes?q=isbn:' + encodeURIComponent(code));
+      const resp = await fetch('https://www.googleapis.com/books/v1/volumes?q=isbn:' + encodeURIComponent(cleanCode));
       const data = await resp.json();
       if(data && data.items && data.items.length > 0){
         const vi = data.items[0].volumeInfo;
@@ -734,10 +778,34 @@
         if(vi.imageLinks){
           cover = (vi.imageLinks.thumbnail || vi.imageLinks.smallThumbnail || '').replace('http://','https://');
         }
-        const volMatch = title.match(/(?:том|vol\.?|volume|№|#)\s*(\d+)/i);
-        if(volMatch) volume = volMatch[1];
       }
     }catch(e){}
+
+    if(!title){
+      try{
+        const resp2 = await fetch('https://openlibrary.org/api/books?bibkeys=ISBN:' + encodeURIComponent(cleanCode) + '&format=json&jscmd=data');
+        const data2 = await resp2.json();
+        const rec = data2 && data2['ISBN:' + cleanCode];
+        if(rec){
+          title = rec.title || '';
+          if(rec.subtitle) title += ' ' + rec.subtitle;
+          if(rec.cover){
+            cover = rec.cover.medium || rec.cover.large || rec.cover.small || '';
+          }
+        }
+      }catch(e){}
+    }
+
+    if(title){
+      const volMatch = title.match(/(?:том|vol\.?|volume|№|#)\s*(\d+)/i);
+      if(volMatch) volume = volMatch[1];
+    }
+
+    return { title, cover, volume, cleanCode };
+  }
+
+  async function lookupByISBN(code){
+    const { title, cover, volume, cleanCode } = await fetchIsbnData(code);
 
     document.getElementById('scanResultBox').style.display = 'block';
     document.getElementById('scanStatus').style.display = 'none';
@@ -747,10 +815,10 @@
     const preview = document.getElementById('lookupPreview');
     if(title){
       preview.innerHTML = `${cover ? `<div class="cover"><img src="${escapeHtml(cover)}"></div>` : `<div class="cover placeholder" style="background:${colorForTitle(title)}">${escapeHtml(title[0].toUpperCase())}</div>`}
-        <div class="txt"><b>${escapeHtml(title)}</b>ISBN: ${escapeHtml(code)}</div>`;
+        <div class="txt"><b>${escapeHtml(title)}</b>ISBN: ${escapeHtml(cleanCode)}</div>`;
     } else {
       preview.innerHTML = `<div class="cover placeholder" style="background:var(--ink-faint)">?</div>
-        <div class="txt"><b>Не вдалося знайти назву</b>Введіть дані вручну нижче. ISBN: ${escapeHtml(code)}</div>`;
+        <div class="txt"><b>Видання не знайдено в базах</b>Багатьох українських манга-видань там немає — впишіть назву й том нижче вручну. <a href="https://www.google.com/search?q=ISBN+${encodeURIComponent(cleanCode)}" target="_blank" rel="noopener" style="color:var(--red); font-weight:700;">Пошукати ISBN ${escapeHtml(cleanCode)} в Google ↗</a></div>`;
     }
     preview.dataset.cover = cover;
   }
@@ -768,6 +836,31 @@
     if(!title) return;
     await saveItem({ id: Date.now().toString(36) + Math.random().toString(36).slice(2,7), title, volume, cover, isbn: lastScannedISBN || '' });
     closeSheetFn();
+  });
+
+  document.getElementById('manualLookupBtn').addEventListener('click', async () => {
+    const isbnVal = document.getElementById('manualIsbn').value.trim();
+    const statusEl = document.getElementById('manualLookupStatus');
+    if(!isbnVal){
+      statusEl.textContent = 'Введіть ISBN або цифри зі штрих-коду.';
+      return;
+    }
+    statusEl.textContent = 'Шукаємо...';
+    const btn = document.getElementById('manualLookupBtn');
+    btn.disabled = true;
+    try{
+      const result = await fetchIsbnData(isbnVal);
+      if(result.title){
+        document.getElementById('manualTitle').value = result.title;
+        if(result.volume) document.getElementById('manualVolume').value = result.volume;
+        if(result.cover) document.getElementById('manualCover').value = result.cover;
+        statusEl.textContent = 'Знайдено — перевірте поля нижче.';
+      } else {
+        statusEl.innerHTML = `Не знайдено. <a href="https://www.google.com/search?q=ISBN+${encodeURIComponent(isbnVal)}" target="_blank" rel="noopener" style="color:var(--red); font-weight:700;">Пошукати в Google ↗</a>`;
+      }
+    } finally {
+      btn.disabled = false;
+    }
   });
 
   document.getElementById('manualSaveBtn').addEventListener('click', async () => {
